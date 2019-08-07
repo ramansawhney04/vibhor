@@ -1,0 +1,181 @@
+Parameters:
+  EnvType:
+    Description: Environment Type
+    Default: dev
+    Type: String
+    AllowedValues: [ dev, sit, prod ]
+    ConstraintDescription: Select the Environment for Creation.
+  AMI:
+    Description: AMI for EC2 Instance
+    Default: ami-0bdfa1adc3878cd23
+    Type: String        
+  InstanceType:
+    Description: Instance Type
+    Default: c5.large
+    Type: String
+    AllowedValues: [ t3.small, t3.medium, m4.medium, m5.medium, m5.large, c5.large]
+    ConstraintDescription: Select the Instance Type for EC2.
+  HibernationOptions:
+    Description: Instance Option
+    Type: String
+    Default: true
+  RootVolumeSize:
+    Description: Root volume size.
+    Type: Number
+    Default: 30
+  SecondaryVolumeSize:
+    Description: Secondary volume size.
+    Type: Number
+    Default: 100
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance.
+    Type: 'AWS::EC2::KeyPair::KeyName'
+  App:
+    Description: Application Short Name
+    Type: String
+    Default: test
+  LBSubnetId1:
+    Description: First Subnet ID for the LB
+    Type: String
+    Default: "subnet-4049f93a"
+  LBSubnetId2:
+    Description: Second Subnet ID for the LB
+    Type: String
+    Default: "subnet-4dd8ac24"
+  InstanceSubnetId:
+    Description: Subnet ID for the instance
+    Type: String
+    Default: "subnet-4049f93a"
+  SecurityGroup:
+    Description: SG for the application
+    Type: String
+    Default: "sg-0f13cd846d4ed4e9b"
+  SecurityGroupLB:
+    Description: SG for the LB
+    Type: String
+    Default: "sg-031b163c21035c85e"
+  LaunchTemplateName:
+    Description: Name of launch template 
+    Type: String
+    Default: default_template_name
+  LaunchTemplateVersion:
+    Description: Version of launch template to use
+    Type: Number
+    Default: 1
+		
+Resources:
+  MyEC2InstanceLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Ref LaunchTemplateName
+      LaunchTemplateData:
+        ImageId: !Ref AMI
+        KeyName: !Ref KeyName
+        InstanceType: !Ref InstanceType
+        HibernationOptions:
+          Configured: !Ref HibernationOptions
+  MyEC2Instance: 
+    Type: AWS::EC2::Instance
+    Properties: 
+      LaunchTemplate:
+        LaunchTemplateName: !Ref LaunchTemplateName
+        Version: !Ref LaunchTemplateVersion
+      ImageId: !Ref AMI
+      KeyName: !Ref KeyName
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref InstanceSubnetId
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvType}-${App}-server"
+        - Key: Environment
+          Value: !Ref EnvType
+      BlockDeviceMappings: 
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeType: "gp2"
+            DeleteOnTermination: "true"
+            VolumeSize: !Ref RootVolumeSize
+            Encrypted: True
+    DependsOn:
+      - MyEC2InstanceLaunchTemplate
+        - DeviceName: "/dev/sdb"
+          Ebs:
+            VolumeType: "gp2"
+            DeleteOnTermination: "true"
+            VolumeSize: !Ref SecondaryVolumeSize
+            #Encrypted: True
+        UserData:
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash -xe
+              # create mount point directory
+              mkdir /data
+              # create ext4 filesystem on new volume           
+              mkfs -t ext4 /dev/sdb
+              # add an entry to fstab to mount volume during boot
+              echo "/dev/sdb       /data   ext4    defaults,nofail 0       2" >> /etc/fstab
+              # mount the volume on current boot
+              mount -a
+              # Install Docker
+              yum update -y && yum install docker -y && service docker start && usermod -a -G docker ec2-user
+              # install nginx
+              yum install nginx -y
+              # restart nginx service
+              service nginx start
+# Classic LoadBalancer for Core-App application
+  ClassicLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      LoadBalancerName: !Sub "${EnvType}-${App}-clb"
+      Scheme: "internet-facing"
+      CrossZone: True
+      SecurityGroups: 
+        - !Ref SecurityGroup
+        - !Ref SecurityGroupLB
+      # fetch Public Subnet ID
+      Subnets:
+        - !Ref LBSubnetId1
+        - !Ref LBSubnetId2
+      Instances:
+        - !Ref MyEC2Instance
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvType}-${App}-clb"
+        - Key: Environment
+          Value: !Ref EnvType
+      Listeners:
+      - LoadBalancerPort: 80
+        InstancePort: 80
+        Protocol: HTTP
+      HealthCheck:
+        Target:
+          Fn::Join:
+          - ''
+          - - 'HTTP:'
+            - '80'
+            - "/"
+        HealthyThreshold: '3'
+        UnhealthyThreshold: '5'
+        Interval: '30'
+        Timeout: '5'
+
+Outputs:
+  EC2InstanceID:
+    Description: EC2 Instance ID
+    Value: !Ref MyEC2Instance
+    Export:
+      Name: EC2InstanceID
+
+  EC2PrivateIP:
+    Description: Private IP of the instance
+    Value: !GetAtt MyEC2Instance.PrivateIp
+    Export:
+      Name: EC2PrivateIP
+  
+  LBDNSName:
+    Description: DNS Name of the Load Balancer
+    Value: !GetAtt ClassicLoadBalancer.DNSName
+    Export:
+      Name: LBDNSName
